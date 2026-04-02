@@ -1,0 +1,587 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Format, Analyze & Unit Tests ───
+
+  format-analyze-test:
+    name: Format, Analyze & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Install example dependencies
+        run: flutter pub get
+        working-directory: example
+
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze root package
+        run: flutter analyze --fatal-infos .
+
+      - name: Analyze example app
+        run: flutter analyze --fatal-infos .
+        working-directory: example
+
+      - name: Run unit tests
+        run: flutter test
+
+  # ─── Build Jobs ───
+
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android CMake
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "cmake;3.18.1" || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "cmake;3.22.1" || true
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('example/android/**/*.gradle*', 'android/**/*.gradle*') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build APK (debug)
+        run: flutter build apk --debug
+        working-directory: example
+
+  build-ios:
+    name: Build iOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: example/ios/Pods
+          key: pods-ios-${{ hashFiles('example/ios/Podfile.lock') }}
+          restore-keys: pods-ios-
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --debug --no-codesign
+        working-directory: example
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: example/macos/Pods
+          key: pods-macos-${{ hashFiles('example/macos/Podfile.lock') }}
+          restore-keys: pods-macos-
+
+      - name: Build macOS
+        run: flutter build macos --debug
+        working-directory: example
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libheif-dev libpng-dev \
+            clang cmake ninja-build pkg-config libgtk-3-dev
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build Linux
+        run: flutter build linux --debug
+        working-directory: example
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'b5d1a94fb7f88fd835e360fd23a45a09ceedbf48'
+
+      - name: Install native dependencies via vcpkg
+        run: vcpkg install libheif[core]:x64-windows libpng:x64-windows
+
+      - name: Copy native deps to third_party
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "$env:GITHUB_WORKSPACE/vcpkg" }
+          $installed = "$vcpkgRoot/installed/x64-windows"
+
+          $destInclude = "windows/third_party/include"
+          $destLib = "windows/third_party/lib"
+          $destBin = "windows/third_party/bin"
+
+          New-Item -ItemType Directory -Force -Path $destInclude/libheif
+          New-Item -ItemType Directory -Force -Path $destLib
+          New-Item -ItemType Directory -Force -Path $destBin
+
+          Copy-Item "$installed/include/libheif/*.h" "$destInclude/libheif/"
+          Copy-Item "$installed/include/png.h" "$destInclude/"
+          Copy-Item "$installed/include/pngconf.h" "$destInclude/"
+          Copy-Item "$installed/include/pnglibconf.h" "$destInclude/"
+          Copy-Item "$installed/include/zlib.h" "$destInclude/"
+          Copy-Item "$installed/include/zconf.h" "$destInclude/"
+
+          Copy-Item "$installed/lib/heif.lib" "$destLib/"
+          Copy-Item "$installed/lib/de265.lib" "$destLib/" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lib/libde265.lib" "$destLib/de265.lib" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lib/libpng16.lib" "$destLib/"
+          Copy-Item "$installed/lib/zlib.lib" "$destLib/"
+
+          Copy-Item "$installed/bin/heif.dll" "$destBin/"
+          Copy-Item "$installed/bin/libde265.dll" "$destBin/" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/bin/de265.dll" "$destBin/libde265.dll" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/bin/libpng16.dll" "$destBin/"
+          Copy-Item "$installed/bin/zlib1.dll" "$destBin/"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build Windows
+        run: flutter build windows --debug
+        working-directory: example
+
+  # ─── Integration Tests ───
+
+  integration-android:
+    name: Integration Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android CMake
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "cmake;3.18.1" || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "cmake;3.22.1" || true
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('example/android/**/*.gradle*', 'android/**/*.gradle*') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install example dependencies
+        run: flutter pub get
+        working-directory: example
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run integration tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          disable-animations: true
+          working-directory: example
+          script: flutter test integration_test/ -d emulator-5554
+
+  integration-ios:
+    name: Integration iOS
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: example/ios/Pods
+          key: pods-ios-${{ hashFiles('example/ios/Podfile.lock') }}
+          restore-keys: pods-ios-
+
+      - name: Install example dependencies
+        run: flutter pub get
+        working-directory: example
+
+      - name: Install GNU coreutils
+        run: |
+          brew install coreutils
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Create and boot iOS simulator
+        run: |
+          # Create a dedicated simulator to avoid stale runtime state from
+          # reusing a pre-existing device.
+          RUNTIME=$(xcrun simctl list runtimes available -j | \
+            python3 -c "import sys,json; rts=json.load(sys.stdin)['runtimes']; print(next(r['identifier'] for r in reversed(rts) if 'iOS' in r['name']))")
+          DEVICE_ID=$(xcrun simctl create "heic_native-ci" "iPhone 16" "$RUNTIME")
+          xcrun simctl boot "$DEVICE_ID"
+          # Block until the simulator is fully booted.
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          # Launch Simulator.app so the UI runloop is active — avoids
+          # a race where flutter test installs the app before the
+          # runtime is ready to accept debug connections.
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE_ID"
+          # Warm the runtime by launching a system app. This ensures
+          # SpringBoard and the debug services are fully initialized.
+          xcrun simctl launch "$DEVICE_ID" com.apple.Preferences || true
+          sleep 5
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+
+      - name: Pre-warm iOS build
+        run: flutter build ios --debug --no-codesign --simulator
+        working-directory: example
+
+      # flutter test on iOS simulators can hang indefinitely waiting for
+      # the Dart VM Service connection (simulators.dart has no timeout on
+      # that await). Use a retry loop with process cleanup and simulator
+      # reboot — same defensive pattern as the macOS job.
+      - name: Run integration tests on iOS simulator
+        working-directory: example
+        timeout-minutes: 15
+        run: |
+          set -e
+          MAX_ATTEMPTS=3
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "========================================="
+            echo "Attempt $attempt of $MAX_ATTEMPTS"
+            echo "========================================="
+            # Kill any leftover app/flutter processes from prior attempts.
+            pkill -9 -f "Runner" 2>/dev/null || true
+            pkill -9 -f "Flutter" 2>/dev/null || true
+            sleep 2
+            # Run with a 4-minute timeout per attempt — if the VM
+            # connection hangs, we want to kill and retry quickly rather
+            # than burn the full step timeout on a single hung attempt.
+            LOG_FILE="$RUNNER_TEMP/ios_test_attempt_${attempt}.log"
+            set +e
+            timeout 240 flutter test integration_test/ -d "$DEVICE_ID" \
+              --no-pub --reporter expanded 2>&1 | tee "$LOG_FILE"
+            EXIT_CODE=${PIPESTATUS[0]}
+            set -e
+            if [ "$EXIT_CODE" -eq 0 ] && grep -qE "(All tests passed|[0-9]+ tests? passed)" "$LOG_FILE"; then
+              echo "Tests passed on attempt $attempt."
+              exit 0
+            fi
+            echo "Attempt $attempt failed (exit code $EXIT_CODE)."
+            # If tests actually ran and reported failures, don't retry.
+            if grep -qE "Some tests failed" "$LOG_FILE" 2>/dev/null; then
+              echo "Tests ran but had failures — not retrying."
+              exit 1
+            fi
+            echo "No test output or VM connection hang. Retrying..."
+            # Reboot the simulator for a clean slate.
+            xcrun simctl shutdown "$DEVICE_ID" 2>/dev/null || true
+            xcrun simctl erase "$DEVICE_ID" 2>/dev/null || true
+            sleep 2
+            xcrun simctl boot "$DEVICE_ID"
+            xcrun simctl bootstatus "$DEVICE_ID" -b
+            open -a Simulator --args -CurrentDeviceUDID "$DEVICE_ID"
+            xcrun simctl launch "$DEVICE_ID" com.apple.Preferences || true
+            sleep 5
+          done
+          echo "All $MAX_ATTEMPTS attempts failed."
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            echo "--- Attempt $i output ---"
+            cat "$RUNNER_TEMP/ios_test_attempt_${i}.log" 2>/dev/null || true
+          done
+          exit 1
+
+      - name: Delete dedicated iOS simulator
+        if: always()
+        run: |
+          if [ -n "${DEVICE_ID:-}" ]; then
+            xcrun simctl shutdown "$DEVICE_ID" 2>/dev/null || true
+            xcrun simctl delete "$DEVICE_ID" 2>/dev/null || true
+          fi
+
+  integration-macos:
+    name: Integration macOS
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: example/macos/Pods
+          key: pods-macos-${{ hashFiles('example/macos/Podfile.lock') }}
+          restore-keys: pods-macos-
+
+      - name: Install example dependencies
+        run: flutter pub get
+        working-directory: example
+
+      # Flutter desktop test runner bug: run test files one at a time
+      # with process kills between runs to avoid "Failed to foreground
+      # app" / "Error waiting for a debug connection" errors.
+      - name: Run integration tests
+        working-directory: example
+        run: |
+          set -e
+          TEST_FILES=(
+            plugin_integration_test.dart
+          )
+          FAILED=()
+          for f in "${TEST_FILES[@]}"; do
+            echo "========================================="
+            echo "Running: $f"
+            echo "========================================="
+            pkill -9 -f "heic_native_example" 2>/dev/null || true
+            sleep 2
+            OUTPUT=$(flutter test "integration_test/$f" -d macos 2>&1) || true
+            echo "$OUTPUT"
+            if echo "$OUTPUT" | grep -q "Some tests failed" || \
+               ! echo "$OUTPUT" | grep -qE "(All tests passed|[0-9]+ tests? passed)"; then
+              FAILED+=("$f")
+              echo "::error::FAILED: $f"
+            fi
+          done
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo ""
+            echo "========================================="
+            echo "FAILED TESTS:"
+            printf '  - %s\n' "${FAILED[@]}"
+            echo "========================================="
+            exit 1
+          fi
+          echo "All ${#TEST_FILES[@]} test files passed."
+
+  integration-linux:
+    name: Integration Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libheif-dev libpng-dev \
+            clang cmake ninja-build pkg-config libgtk-3-dev xvfb
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install example dependencies
+        run: flutter pub get
+        working-directory: example
+
+      - name: Start Xvfb
+        run: |
+          /usr/bin/Xvfb :99 -screen 0 1280x1024x24 -ac +extension GLX +render -noreset &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
+          echo "GDK_BACKEND=x11" >> "$GITHUB_ENV"
+
+      - name: Run integration tests
+        working-directory: example
+        run: |
+          set -e
+          TEST_FILES=(
+            plugin_integration_test.dart
+          )
+          FAILED=()
+          for f in "${TEST_FILES[@]}"; do
+            echo "========================================="
+            echo "Running: $f"
+            echo "========================================="
+            pkill -9 -f "heic_native_example" 2>/dev/null || true
+            sleep 2
+            flutter test "integration_test/$f" -d linux 2>&1 | tee "$RUNNER_TEMP/$f.log" || true
+            if grep -q "Some tests failed" "$RUNNER_TEMP/$f.log" || \
+               ! grep -qE "(All tests passed|[0-9]+ tests? passed)" "$RUNNER_TEMP/$f.log"; then
+              FAILED+=("$f")
+              echo "::error::FAILED: $f"
+            fi
+          done
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo ""
+            echo "========================================="
+            echo "FAILED TESTS:"
+            printf '  - %s\n' "${FAILED[@]}"
+            echo "========================================="
+            for f in "${FAILED[@]}"; do
+              echo ""
+              echo "--- Output for $f ---"
+              cat "$RUNNER_TEMP/$f.log"
+            done
+            exit 1
+          fi
+          echo "All ${#TEST_FILES[@]} test files passed."
+
+  integration-windows:
+    name: Integration Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'b5d1a94fb7f88fd835e360fd23a45a09ceedbf48'
+
+      - name: Install native dependencies via vcpkg
+        run: vcpkg install libheif[core]:x64-windows libpng:x64-windows
+
+      - name: Copy native deps to third_party
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "$env:GITHUB_WORKSPACE/vcpkg" }
+          $installed = "$vcpkgRoot/installed/x64-windows"
+
+          $destInclude = "windows/third_party/include"
+          $destLib = "windows/third_party/lib"
+          $destBin = "windows/third_party/bin"
+
+          New-Item -ItemType Directory -Force -Path $destInclude/libheif
+          New-Item -ItemType Directory -Force -Path $destLib
+          New-Item -ItemType Directory -Force -Path $destBin
+
+          Copy-Item "$installed/include/libheif/*.h" "$destInclude/libheif/"
+          Copy-Item "$installed/include/png.h" "$destInclude/"
+          Copy-Item "$installed/include/pngconf.h" "$destInclude/"
+          Copy-Item "$installed/include/pnglibconf.h" "$destInclude/"
+          Copy-Item "$installed/include/zlib.h" "$destInclude/"
+          Copy-Item "$installed/include/zconf.h" "$destInclude/"
+
+          Copy-Item "$installed/lib/heif.lib" "$destLib/"
+          Copy-Item "$installed/lib/de265.lib" "$destLib/" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lib/libde265.lib" "$destLib/de265.lib" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lib/libpng16.lib" "$destLib/"
+          Copy-Item "$installed/lib/zlib.lib" "$destLib/"
+
+          Copy-Item "$installed/bin/heif.dll" "$destBin/"
+          Copy-Item "$installed/bin/libde265.dll" "$destBin/" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/bin/de265.dll" "$destBin/libde265.dll" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/bin/libpng16.dll" "$destBin/"
+          Copy-Item "$installed/bin/zlib1.dll" "$destBin/"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install example dependencies
+        run: flutter pub get
+        working-directory: example
+
+      - name: Run integration tests
+        working-directory: example
+        shell: bash
+        run: |
+          set -e
+          TEST_FILES=(
+            plugin_integration_test.dart
+          )
+          FAILED=()
+          for f in "${TEST_FILES[@]}"; do
+            echo "========================================="
+            echo "Running: $f"
+            echo "========================================="
+            taskkill //F //IM "heic_native_example.exe" 2>/dev/null || true
+            sleep 2
+            OUTPUT=$(flutter test "integration_test/$f" -d windows 2>&1) || true
+            echo "$OUTPUT"
+            if echo "$OUTPUT" | grep -q "Some tests failed" || \
+               ! echo "$OUTPUT" | grep -qE "(All tests passed|[0-9]+ tests? passed)"; then
+              FAILED+=("$f")
+              echo "::error::FAILED: $f"
+            fi
+          done
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo ""
+            echo "========================================="
+            echo "FAILED TESTS:"
+            printf '  - %s\n' "${FAILED[@]}"
+            echo "========================================="
+            exit 1
+          fi
+          echo "All ${#TEST_FILES[@]} test files passed."

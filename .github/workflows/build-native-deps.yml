@@ -1,0 +1,248 @@
+name: Build Native Dependencies
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'b5d1a94fb7f88fd835e360fd23a45a09ceedbf48'
+
+      - name: Install dependencies via vcpkg
+        run: vcpkg install libheif[core]:x64-windows libpng:x64-windows
+        env:
+          VCPKG_DEFAULT_TRIPLET: x64-windows
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "$env:GITHUB_WORKSPACE/vcpkg" }
+          $installed = "$vcpkgRoot/installed/x64-windows"
+
+          $dest = "windows-third-party"
+          New-Item -ItemType Directory -Force -Path $dest/include/libheif
+          New-Item -ItemType Directory -Force -Path $dest/lib
+          New-Item -ItemType Directory -Force -Path $dest/bin
+
+          Copy-Item "$installed/include/libheif/*.h" "$dest/include/libheif/"
+          Copy-Item "$installed/include/png.h" "$dest/include/"
+          Copy-Item "$installed/include/pngconf.h" "$dest/include/"
+          Copy-Item "$installed/include/pnglibconf.h" "$dest/include/"
+          Copy-Item "$installed/include/zlib.h" "$dest/include/"
+          Copy-Item "$installed/include/zconf.h" "$dest/include/"
+
+          Copy-Item "$installed/lib/heif.lib" "$dest/lib/"
+          Copy-Item "$installed/lib/de265.lib" "$dest/lib/" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lib/libde265.lib" "$dest/lib/de265.lib" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lib/libpng16.lib" "$dest/lib/"
+          Copy-Item "$installed/lib/zlib.lib" "$dest/lib/"
+
+          Copy-Item "$installed/bin/heif.dll" "$dest/bin/"
+          Copy-Item "$installed/bin/libde265.dll" "$dest/bin/" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/bin/de265.dll" "$dest/bin/libde265.dll" -ErrorAction SilentlyContinue
+          Copy-Item "$installed/bin/libpng16.dll" "$dest/bin/"
+          Copy-Item "$installed/bin/zlib1.dll" "$dest/bin/"
+
+          Write-Host "=== Contents ==="
+          Get-ChildItem -Recurse $dest
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-third-party
+          path: windows-third-party/
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libde265-dev libpng-dev
+
+      - name: Build libheif from source
+        run: |
+          HEIF_VERSION="1.17.6"
+          curl -fL "https://github.com/strukturag/libheif/releases/download/v${HEIF_VERSION}/libheif-${HEIF_VERSION}.tar.gz" \
+            -o libheif.tar.gz
+          tar xzf libheif.tar.gz
+          cd "libheif-${HEIF_VERSION}"
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/linux-third-party" \
+            -DWITH_EXAMPLES=OFF \
+            -DWITH_GDK_PIXBUF=OFF \
+            -DBUILD_TESTING=OFF
+          make -j$(nproc)
+          make install
+
+      - name: Copy libde265 shared library
+        run: cp /usr/lib/x86_64-linux-gnu/libde265.so* linux-third-party/lib/ || true
+
+      - name: List artifacts
+        run: find linux-third-party -type f | sort
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-third-party
+          path: linux-third-party/
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Set up Android NDK
+        run: |
+          NDK_VERSION="r27c"
+          curl -fL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" \
+            -o android-ndk.zip
+          unzip -q android-ndk.zip
+          echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: Build native deps for all ABIs
+        run: |
+          set -e
+          LIBPNG_VERSION="1.6.43"
+          LIBDE265_VERSION="1.0.15"
+          HEIF_VERSION="1.17.6"
+          NDK="$ANDROID_NDK_HOME"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/android-native-deps"
+
+          # Download sources
+          curl -fL "https://downloads.sourceforge.net/project/libpng/libpng16/${LIBPNG_VERSION}/libpng-${LIBPNG_VERSION}.tar.gz" \
+            -o libpng.tar.gz
+          tar xzf libpng.tar.gz
+
+          curl -fL "https://github.com/strukturag/libde265/releases/download/v${LIBDE265_VERSION}/libde265-${LIBDE265_VERSION}.tar.gz" \
+            -o libde265.tar.gz
+          tar xzf libde265.tar.gz
+
+          curl -fL "https://github.com/strukturag/libheif/releases/download/v${HEIF_VERSION}/libheif-${HEIF_VERSION}.tar.gz" \
+            -o libheif.tar.gz
+          tar xzf libheif.tar.gz
+
+          build_for_abi() {
+            ABI="$1"
+            API="$2"
+            TARGET="$3"
+            CLANG_TARGET="$4"
+
+            INSTALL_DIR="$GITHUB_WORKSPACE/install-${ABI}"
+            mkdir -p "$INSTALL_DIR"
+            ABI_OUTPUT="$OUTPUT_DIR/$ABI"
+            mkdir -p "$ABI_OUTPUT"
+
+            export CC="$TOOLCHAIN/bin/${CLANG_TARGET}${API}-clang"
+            export CXX="$TOOLCHAIN/bin/${CLANG_TARGET}${API}-clang++"
+            export AR="$TOOLCHAIN/bin/llvm-ar"
+            export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+            export STRIP="$TOOLCHAIN/bin/llvm-strip"
+            export CMAKE_SYSROOT="$TOOLCHAIN/sysroot"
+
+            CMAKE_FLAGS=(
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
+              -DANDROID_ABI="$ABI"
+              -DANDROID_PLATFORM="android-${API}"
+              -DANDROID_STL=c++_static
+              -DCMAKE_BUILD_TYPE=Release
+              -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
+            )
+
+            # Build libpng
+            echo "=== Building libpng for $ABI ==="
+            BUILD_DIR="$GITHUB_WORKSPACE/build-libpng-${ABI}"
+            mkdir -p "$BUILD_DIR"
+            cmake -S "$GITHUB_WORKSPACE/libpng-${LIBPNG_VERSION}" -B "$BUILD_DIR" \
+              "${CMAKE_FLAGS[@]}" \
+              -DPNG_SHARED=ON \
+              -DPNG_STATIC=OFF \
+              -DPNG_TESTS=OFF \
+              -DZLIB_ROOT="$CMAKE_SYSROOT/usr"
+            cmake --build "$BUILD_DIR" -j$(nproc)
+            cmake --install "$BUILD_DIR"
+
+            # Build libde265
+            echo "=== Building libde265 for $ABI ==="
+            BUILD_DIR="$GITHUB_WORKSPACE/build-libde265-${ABI}"
+            mkdir -p "$BUILD_DIR"
+            cmake -S "$GITHUB_WORKSPACE/libde265-${LIBDE265_VERSION}" -B "$BUILD_DIR" \
+              "${CMAKE_FLAGS[@]}" \
+              -DENABLE_SDL=OFF \
+              -DENABLE_DECODER=ON \
+              -DENABLE_ENCODER=OFF \
+              -DBUILD_TESTING=OFF
+            cmake --build "$BUILD_DIR" -j$(nproc)
+            cmake --install "$BUILD_DIR"
+
+            # Build libheif
+            echo "=== Building libheif for $ABI ==="
+            BUILD_DIR="$GITHUB_WORKSPACE/build-libheif-${ABI}"
+            mkdir -p "$BUILD_DIR"
+            cmake -S "$GITHUB_WORKSPACE/libheif-${HEIF_VERSION}" -B "$BUILD_DIR" \
+              "${CMAKE_FLAGS[@]}" \
+              -DCMAKE_PREFIX_PATH="$INSTALL_DIR" \
+              -DWITH_EXAMPLES=OFF \
+              -DWITH_GDK_PIXBUF=OFF \
+              -DBUILD_TESTING=OFF \
+              -DWITH_LIBDE265=ON \
+              -DWITH_X265=OFF \
+              -DWITH_AOM=OFF \
+              -DWITH_RAV1E=OFF \
+              -DWITH_JPEG=OFF \
+              -DWITH_OPENJPEG=OFF \
+              -DLIBDE265_INCLUDE_DIR="$INSTALL_DIR/include" \
+              -DLIBDE265_LIBRARY="$INSTALL_DIR/lib/libde265.so" \
+              -DPNG_PNG_INCLUDE_DIR="$INSTALL_DIR/include" \
+              -DPNG_LIBRARY="$INSTALL_DIR/lib/libpng16.so"
+            cmake --build "$BUILD_DIR" -j$(nproc)
+            cmake --install "$BUILD_DIR"
+
+            # Collect .so files
+            find "$INSTALL_DIR/lib" -name "*.so" -not -name "*.so.*" | while read f; do
+              cp "$f" "$ABI_OUTPUT/"
+            done
+            # Also collect versioned symlink targets
+            find "$INSTALL_DIR/lib" -name "*.so.*" -type f | while read f; do
+              cp "$f" "$ABI_OUTPUT/" 2>/dev/null || true
+            done
+
+            echo "=== $ABI output ==="
+            ls -la "$ABI_OUTPUT/"
+          }
+
+          # arm64-v8a: API 21+
+          build_for_abi "arm64-v8a"   "21" "aarch64-linux-android" "aarch64-linux-android"
+          # armeabi-v7a: API 19+
+          build_for_abi "armeabi-v7a" "19" "arm-linux-androideabi"  "armv7a-linux-androideabi"
+          # x86_64: API 21+
+          build_for_abi "x86_64"      "21" "x86_64-linux-android"   "x86_64-linux-android"
+          # x86: API 19+
+          build_for_abi "x86"         "19" "i686-linux-android"      "i686-linux-android"
+
+          echo "=== Final artifact tree ==="
+          find "$OUTPUT_DIR" -type f | sort
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-deps
+          path: android-native-deps/
